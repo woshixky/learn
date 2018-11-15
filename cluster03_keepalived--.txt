@@ -1,0 +1,271 @@
+--
+
+
+
+高可用集群   high   availablity
+
+双机热备
+
+
+
+高可用常规结构图		
+
+client	www.itjiangshi.com -->IP
+
+			IP			           IP
+
+				       心跳
+			主  －－－－－－－－－－>	备
+		      httpd		      httpd
+		     
+目标：			
+互为备份，实现高可用性。
+共享存储
+
+
+
+心跳：主和备每隔一定时间会有一个通讯信息，称之为心跳；主要作用的就是备机监控主机是否alive（活着）；
+
+心跳线：串口(console)或者RJ－45连接，一般普通网线就可以了
+
+
+vip:virtual IP(虚拟ip),floating IP(浮动IP)；谁接管服务，就在谁那里；它就是上层程序要访问的IP，如果主崩溃，备会使用send_arp的形式抢到vip
+
+
+资源:resources是会随着主备切换的。如VIP，httpd等
+
+
+问题:如果做的是httpd的HA集群，那么这两个httpd家目录的内容要一致，方法有:
+1,rsync远程实时同步（目录实时同步）  drbd(磁盘实时同步)   
+2,共享存储(nfs,gfs2,ocfs2)   
+3,分布式存储(mfs,hdfs,glusterfs,ceph)
+等等
+
+
+什么东西可以做HA?
+只要能做成服务（或者能写成脚本启动的)，就能HA
+
+
+脑裂： 当一些特殊情况，比如说心跳线（只有一根的情况）断了，主其实并没有崩溃，但是备机检测不到心跳，会认为主机崩溃，也会接管VIP。那么两边都会有VIP，脑裂就产生了。
+假如设定为：心跳间隔为2秒，死亡时间为1秒. （1秒内没有收到对方的心跳信号就认为死亡）。
+再或者，设定为：心跳间隔为2秒，死亡时间为4秒，但因为一些网络的原因，备机并没有在4秒内收到心跳，也会认为主挂掉，也会脑裂（brain-split）
+
+
+
+
+商业产品：
+IBM PowerHA （原来称为HACMP）
+
+
+开源软件：
+system-config-cluster  --redhat配置集群的一个图形接口
+rhcs（red hat cluster suite)  	--rhel5,rhel6的主要集群套件，rhel7被pacemaker替代
+piranha	 --redhat图形配置接口,rhel7已经被keepalived替代
+heartbeat --linux-HA的项目，比较古老
+untralmonkey       --lvs+heartbeat
+
+
+
+========================================================================================================
+一. keepalived实现httpd的高可用
+
+实验目的： 通过keepalived搭建一个http高可用web服务器。分为主(master)备(backup)两台机器。client由宿主机担任。当主（master）出现问题，会自动切换到备（backup）。
+
+
+(通过下面的例子举一反三，也就是说只要是能用命令启动的服务，你都可以用此思路来实现高可用）
+
+
+                client 192.168.1.3
+                         |
+                         |
+
+            VIP eth0:0 192.168.224.100 (准备环境时不要加此ip，它配置在keepalived里，keepalived启动后产生）   
+                    
+    192.168.224.11     eth0－－－－－－－－－eth0   192.168.224.12
+     主                                                备                    
+    httpd                                           httpd
+
+
+
+
+第一步:
+主备服务器都安装相关软件包，准备相关脚本
+
+# yum install keepalived httpd httpd-devel -y
+
+
+# vim /usr/local/httpd.sh
+(以下是脚本内容)   
+#!/bin/bash
+
+if [ ! -e /var/run/httpd/httpd.pid ];then
+    systemctl start httpd
+fi
+(脚本内容结束)
+# chmod 755 /usr/local/httpd.sh
+
+
+上面的步骤是两台都要做的，下面命令的是两台分别做的（做两个不同主页方便测试）
+[root@master ~]# echo master > /var/www/html/index.html
+[root@backup ~]# echo backup > /var/www/html/index.html
+
+
+
+第二步: master上配置
+[root@master ~]# cat /etc/keepalived/keepalived.conf
+global_defs {
+   router_id LVS_DEVEL
+}
+
+vrrp_script httpd_check {
+    script "/usr/local/httpd.sh"
+    interval 2    
+}
+
+vrrp_instance VI_1 {
+    state MASTER
+    interface ens33
+    lvs_sync_daemon_interface ens33
+    virtual_router_id 51
+    priority 100
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    track_script {
+    httpd_check
+    }
+    virtual_ipaddress {
+    192.168.224.100/24
+    }
+}
+
+
+第二步: backup上配置
+另外一台机器上的配置（client2）
+global_defs {
+   router_id LVS_DEVEL
+}
+
+vrrp_script httpd_check {
+    script "/usr/local/httpd.sh"
+    interval 2    
+}
+
+vrrp_instance VI_1 {
+    state BACKUP
+    interface ens33
+    lvs_sync_daemon_interface ens33
+    virtual_router_id 51
+    priority 99
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    track_script {
+    httpd_check
+    }
+    virtual_ipaddress {
+    192.168.224.100/24
+    }
+}
+
+
+Notes:
+把两个vrrp的
+state MASTER 改为 state BACKUP
+priority 100 改为 priority 99
+
+
+两台lvs调度器都启动keepalived服务
+
+# systemctl restart keepalived 
+# systemctl enable keepalived
+
+第四步:测试
+1，使用ip addr命令查看 主lvs调度器看网卡是否获取到了VIP.只能使用ip addr命令查看，使用ifconfig命令是查看不到的. 最后在client curl 192.168.224.100 发现调度成功.
+
+2. 在mater机器执行命令‘systemctl stop httpd’停掉httpd，在客户端curl 192.168.224.100发现还是继续调度master，在master执行'tail -f /var/log/messages'会发现keepalived进行会自动启动httpd。说明检康检查也OK
+
+3, 主lvs调度器(master)reboot重启或直接断电再开机（保证静态IP，keepalived服务开机自动启动等）
+结果：会快速切换到备lvs调度器(backup)。主lvs调度启动后，会failback回来（自动切换回backup）。
+
+4,在主lvs调度器上systemctl stop keepalived
+结果:正常切换
+
+5,在主lvs调度器删除vip
+# ip address del 192.168.224.100/24 dev ens33
+结果:没有切换到备，整个架构完蛋. 
+
+Note:以上测试过程中，在主备切换后，使用'ip addr'命令可以看到VIP也相应进行由主(master)切换到了备(backup)。 
+
+
+
+======================================================================================================
+二 使用keepalived搭建双网卡主机。
+目的：通常http服务器位于DMZ区域，处于安全需要后台的应用服务器处于防火墙后面并且在另外一个网段。这样就要求http主机要有双网卡，同时能够被互联网访问到，然后http也能够访问另外一个网段的应用程序服务器。
+
+                client 192.168.1.3
+                         |
+                         |
+
+            VIP eth0:0 192.168.224.100 (准备环境时不要加此ip，它配置在keepalived里，keepalived启动后产生）   
+            VIP eth1:0 192.168.198.110 (准备环境时不要加此ip，它配置在keepalived里，keepalived启动后产生）   
+                    
+    192.168.224.11     eth0－－－－－－－－－eth0   192.168.224.12
+     主 master                                        备backup 
+                    
+    192.168.198.11      eth1－－－－－－－－－eth1   192.168.198.12
+                    
+    httpd                                  httpd
+
+要求：在上一个实验的基础上完成本实验
+
+主服务器配置文件
+root@master ~]# vim /etc/keepalived/keepalived.conf
+在文件尾部追加如下：
+
+vrrp_instance VI_2 {
+    state MASTER
+    interface ens37
+    lvs_sync_daemon_interface ens37
+    virtual_router_id 52
+    priority 100
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+    192.168.198.100/24
+    }
+}
+
+备服务器配置文件
+第二步: backup上配置
+另外一台机器上的配置（client2）
+root@backup ~]# vim /etc/keepalived/keepalived.conf
+在文件尾部追加如下：
+
+vrrp_instance VI_2 {
+    state BACKUP
+    interface ens37
+    lvs_sync_daemon_interface ens37
+    virtual_router_id 52
+    priority 100
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+    192.168.198.100/24
+    }
+}
+
+
+
+# systemctl restart keepalived 
+# systemctl enable keepalived
