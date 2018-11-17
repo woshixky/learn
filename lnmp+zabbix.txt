@@ -1,0 +1,130 @@
+配置lnpm+zabbix
+1.lnpm包
+	yum install  epel-release -y
+	yum install nginx -y
+ 	yum install mariadb mariab-server php php-mysql php-gd libjpeg\*  php-ldap php- odbc php-pear php-xml php-xmlrpc php-mbstring php-bcmath php-mhash php-fpm  php-pecl-zendopcache nginx （安装lnpm repo包）
+	systemctl restart mariadb
+	systemctl enable mariadb
+2.配置php文件
+vim /etc/php-fpm.d/www.conf
+	listen = /var/run/php-fpm/fastcgi.socket
+	php_flag[display_errors] = on
+	user = nginx
+	group = nginx
+	listen.owner = nginx
+	listen.group = nginx
+#chown nginx.nginx /var/run/php-fpm/
+#systemctl start php-fpm
+#systemctl enable php-fpm
+#sudo vim /etc/php5/fpm/php.ini
+	post_max_size = 16M
+	max_execution_time = 300
+	max_input_time = 300
+	date.timezone = "Asia/Manila"
+3.配置nginx文件
+#vim /etc/nginx/nginx.conf
+	***
+	server {
+	***
+	index index.php index.html
+	***
+	location ~ \.php$ {
+	    fastcgi_pass     unix:/var/run/php-fpm/fastcgi.socket;(要和/etc/php-fpm/www.conf对应)
+	    fastcgi_index index.php;
+	    fastcgi_param SCRIPT_FILENAME $documet_root$fastcgi_script_name;
+	    include       fastcgi_params;
+        }
+	}
+#systemctl restart nginx
+#systemctl enable nginx
+4.安装zabbix
+#wget http://repo.zabbix.com/zabbix/3.2/rhel/7/x86_64/zabbix-release-3.2-1.el7.n
+oarch.rpm
+#yum install zabbix-release-3.2-1.el7.noarch.rpm
+#yum install zabbix-server-mysql  zabbix-web-mysql   mariadb-server -y
+#systemctl restart mariadb
+#systemctl enable mairadb
+#mysql
+>create database zabbix default charset uft8;
+>grant all on zabbix.* to zabbix@'localhost' identified by '123';
+>flush privileges;
+5.导入zabbix数据库
+#zcat /usr/share/doc/zabbix-server-mysql-3.2.7/create.sql.gz |mysql -u zabbi
+x -p123 zabbix
+6.配置zabbix服务
+#vim /etc/zabbix/zabbix_server.conf
+	12 ListenPort=10051
+	81 DBHost=localhost
+	91 DBName=zabbix
+	107 DBUser=zabbix
+	115 DBPassword=123          --这里要对应上面的授权进行修改
+	122 DBSocket=/var/lib/mysql/mysql.sock  --这里默认的socket路径不对
+	303 ListenIP=0.0.0.0
+    # systemctl restart zabbix-server.service ** There will be issue, if not disa
+ble selinux
+    # systemctl status zabbix-server.service 
+    # systemctl enable zabbix-server.service 
+    # lsof -i:10051
+7.配置zabbix的web的登陆,php的/var/lib/php/session文件
+#chown nginx.nginx /etc/zabbix/web/
+#chown nginx.nginx /var/lib/php/session
+8.登陆
+	http://ip/zabbix
+	
+手动登陆: vim /etc/zabbix/web/zabbix.conf.php
+<?php
+// Zabbix GUI configuration file.
+global $DB;
+
+$DB['TYPE']     = 'MYSQL';
+$DB['SERVER']   = 'localhost';
+$DB['PORT']     = '0';
+$DB['DATABASE'] = 'zabbix';
+$DB['USER']     = 'zabbix';
+$DB['PASSWORD'] = '123';
+
+// Schema name. Used for IBM DB2 and PostgreSQL.
+$DB['SCHEMA'] = '';
+
+$ZBX_SERVER      = 'localhost';
+$ZBX_SERVER_PORT = '10051';
+$ZBX_SERVER_NAME = 'zabbix';
+
+$IMAGE_FORMAT_DEFAULT = IMAGE_FORMAT_PNG;
+
+9.防火墙规则
+iptables -A INPUT -p tcp -m multiport --dport 22,10050,10051
+10.进入zabbix网页
+（1）写脚本telegram
+	#vim /usr/lib/zabbix/alertscripts/bot.sh
+
+#!/bin/bash
+token="792640218:AAFouCZ80FfM21SG9VU8Hpaez4FVOMSWdhY"
+#id=`curl -s https://api.telegram.org/bot$token/getUpdates | grep -w -o -E  "\"id\":[0-9]+" | head -n 1 | awk -F: '{print $2}'`
+id='-316708065'
+test=$1
+curl -s -X POST "https://api.telegram.org/bot$token/sendMessage" -d "chat_id=$id&text=$test"  > /dev/null
+
+（2）进入zabbix网站导入媒体类型
+ 管理--》媒体类型 
+  名称：telegram
+  类型：脚本
+  脚本：bot.sh （和alertscripts路径下一样）
+  脚本参数：{ALERT.MESSAGE}
+点击完成
+ (3) 进入configuration->actions创建触发器
+    名称：telegram
+    条件：
+    新条件： 触发严重性 大于 危险
+   启动 
+ 点击操作
+  ...
+  ...
+    操作：
+   发给用户组：zabbix管理员
+   发给用户： zabbix
+  ...
+  ...
+点击完成
+
+
